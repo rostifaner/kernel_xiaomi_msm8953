@@ -290,6 +290,7 @@ static int f2fs_create(struct inode *dir, struct dentry *dentry, umode_t mode,
 
 	alloc_nid_done(sbi, ino);
 
+	unlock_new_inode(inode);
 	d_instantiate_new(dentry, inode);
 
 	if (IS_DIRSYNC(dir))
@@ -590,6 +591,7 @@ static int f2fs_symlink(struct inode *dir, struct dentry *dentry,
 	err = page_symlink(inode, disk_link.name, disk_link.len);
 
 err_out:
+	unlock_new_inode(inode);
 	d_instantiate_new(dentry, inode);
 
 	/*
@@ -651,6 +653,7 @@ static int f2fs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 
 	alloc_nid_done(sbi, inode->i_ino);
 
+	unlock_new_inode(inode);
 	d_instantiate_new(dentry, inode);
 
 	if (IS_DIRSYNC(dir))
@@ -702,6 +705,7 @@ static int f2fs_mknod(struct inode *dir, struct dentry *dentry,
 
 	alloc_nid_done(sbi, inode->i_ino);
 
+	unlock_new_inode(inode);
 	d_instantiate_new(dentry, inode);
 
 	if (IS_DIRSYNC(dir))
