@@ -151,6 +151,7 @@ static struct kparam_string fwpath = {
 static char *country_code;
 static int   enable_11d = -1;
 static int   enable_dfs_chan_scan = -1;
+static int   gbcnMissRate = -1;
 
 #ifndef MODULE
 static int wlan_hdd_inited;
@@ -2706,38 +2707,18 @@ hdd_parse_reassoc(hdd_adapter_t *pAdapter, const char *command, int total_len)
 }
 #endif  /* WLAN_FEATURE_VOWIFI_11R || FEATURE_WLAN_ESE FEATURE_WLAN_LFR */
 
-struct bcn_miss_rate_priv {
-	int bcn_miss_rate;
-};
-
-/**
- * get_bcn_miss_rate_cb() callback invoked on receiving beacon miss
- * rate from firmware
- * @status: Status of get beacon miss rate operation
- * @bcnMissRate: Beacon miss rate
- * @context: Context passed while registering callback
- *
- * This function is invoked by WDA layer on receiving
- * WDI_GET_BCN_MISS_RATE_RSP
- *
- * Return: None
- */
-static void get_bcn_miss_rate_cb(VOS_STATUS status, int bcnMissRate,
-				 void *context)
+static void get_bcn_miss_rate_cb(VOS_STATUS status, int bcnMissRate, void *data)
 {
 	struct hdd_request *request;
-	struct bcn_miss_rate_priv *priv;
 
-	request = hdd_request_get(context);
+	request = hdd_request_get(data);
 	if (!request) {
 		hddLog(VOS_TRACE_LEVEL_ERROR, FL("Obsolete request"));
 		return;
-	}
-
-	priv = hdd_request_priv(request);
+        }
 
 	if (VOS_STATUS_SUCCESS == status)
-		priv->bcn_miss_rate = bcnMissRate;
+		gbcnMissRate = bcnMissRate;
 	else
 		hddLog(VOS_TRACE_LEVEL_ERROR, FL("failed to get bcnMissRate"));
 
@@ -2751,19 +2732,7 @@ struct fw_stats_priv {
 	tSirFwStatsResult *fw_stats;
 };
 
-/**
- * hdd_fw_stats_cb() callback invoked on receiving firmware stats
- * from firmware
- * @status: Status of get firmware stats operation
- * @fwStatsResult: firmware stats
- * @context: Context passed while registering callback
- *
- * This function is invoked by WDA layer on receiving
- * WDI_GET_FW_STATS_RSP
- *
- * Return: None
- */
-static void hdd_fw_stats_cb(VOS_STATUS status,
+void hdd_fw_statis_cb(VOS_STATUS status,
      tSirFwStatsResult *fwStatsResult, void *context)
 {
 	struct hdd_request *request;
@@ -2778,7 +2747,7 @@ static void hdd_fw_stats_cb(VOS_STATUS status,
 	}
 	priv = hdd_request_priv(request);
 
-	if (VOS_STATUS_SUCCESS == status)
+	if (VOS_STATUS_SUCCESS != status)
 		*priv->fw_stats = *fwStatsResult;
 	else
 		priv->fw_stats = NULL;
@@ -3597,15 +3566,12 @@ static inline void hdd_assign_reassoc_handoff(tCsrHandoffRequest *handoffInfo)
 
 static void wlan_hdd_free_cache_channels(hdd_context_t *hdd_ctx)
 {
-	if(!hdd_ctx || !hdd_ctx->original_channels)
-		return;
-
 	mutex_lock(&hdd_ctx->cache_channel_lock);
-	hdd_ctx->original_channels->num_channels = 0;
-	vos_mem_free(hdd_ctx->original_channels->channel_info);
-	hdd_ctx->original_channels->channel_info = NULL;
-	vos_mem_free(hdd_ctx->original_channels);
-	hdd_ctx->original_channels = NULL;
+	hdd_ctx->orginal_channels->num_channels = 0;
+	vos_mem_free(hdd_ctx->orginal_channels->channel_info);
+	hdd_ctx->orginal_channels->channel_info = NULL;
+	vos_mem_free(hdd_ctx->orginal_channels);
+	hdd_ctx->orginal_channels = NULL;
 	mutex_unlock(&hdd_ctx->cache_channel_lock);
 }
 
@@ -3621,24 +3587,58 @@ static void wlan_hdd_free_cache_channels(hdd_context_t *hdd_ctx)
 
 int hdd_alloc_chan_cache(hdd_context_t *hdd_ctx, int num_chan)
 {
-	hdd_ctx->original_channels =
+	if (NULL ==  hdd_ctx->orginal_channels) {
+		hdd_ctx->orginal_channels =
 			vos_mem_malloc(sizeof(struct hdd_cache_channels));
-	if (!hdd_ctx->original_channels) {
-		hddLog(VOS_TRACE_LEVEL_ERROR,
-		       "In %s, VOS_MALLOC_ERR", __func__);
-		return -EINVAL;
-	}
-	hdd_ctx->original_channels->num_channels = num_chan;
-	hdd_ctx->original_channels->channel_info =
+		if (NULL ==  hdd_ctx->orginal_channels) {
+			hddLog(VOS_TRACE_LEVEL_ERROR,
+			       "In %s, VOS_MALLOC_ERR", __func__);
+			return -EINVAL;
+		}
+		hdd_ctx->orginal_channels->num_channels = num_chan;
+		hdd_ctx->orginal_channels->channel_info =
 					vos_mem_malloc(num_chan *
 					sizeof(struct hdd_cache_channel_info));
-	if (!hdd_ctx->original_channels->channel_info) {
-		hddLog(VOS_TRACE_LEVEL_ERROR,
-		       "In %s, VOS_MALLOC_ERR", __func__);
-		hdd_ctx->original_channels->num_channels = 0;
-		vos_mem_free(hdd_ctx->original_channels);
-		hdd_ctx->original_channels = NULL;
-		return -ENOMEM;
+		if (NULL ==  hdd_ctx->orginal_channels->channel_info) {
+			hddLog(VOS_TRACE_LEVEL_ERROR,
+			       "In %s, VOS_MALLOC_ERR", __func__);
+			hdd_ctx->orginal_channels->num_channels = 0;
+			vos_mem_free(hdd_ctx->orginal_channels);
+			hdd_ctx->orginal_channels = NULL;
+			return -EINVAL;
+		}
+	} else {
+		/* Same command comes multiple times */
+		struct hdd_cache_channel_info *temp_chan_info;
+
+		if (hdd_ctx->orginal_channels->num_channels + num_chan >
+								MAX_CHANNEL) {
+			hddLog(VOS_TRACE_LEVEL_ERROR,
+			       "%s: Invalid Number of channel received",
+			       __func__);
+			return -EINVAL;
+		}
+
+		temp_chan_info = vos_mem_malloc((
+					hdd_ctx->orginal_channels->
+						num_channels + num_chan) *
+					sizeof(struct hdd_cache_channel_info));
+		if (NULL ==  temp_chan_info) {
+			hddLog(VOS_TRACE_LEVEL_ERROR,
+			       "In %s, VOS_MALLOC_ERR",
+			       __func__);
+			return -EINVAL;
+		}
+
+		vos_mem_copy(temp_chan_info, hdd_ctx->orginal_channels->
+			     channel_info, hdd_ctx->orginal_channels->
+			     num_channels *
+			     sizeof(struct hdd_cache_channel_info));
+
+		hdd_ctx->orginal_channels->num_channels += num_chan;
+		vos_mem_free(hdd_ctx->orginal_channels->channel_info);
+		hdd_ctx->orginal_channels->channel_info = temp_chan_info;
+		temp_chan_info = NULL;
 	}
 	return 0;
 
@@ -3650,9 +3650,7 @@ int hdd_parse_disable_chan_cmd(hdd_adapter_t *adapter, tANI_U8 *ptr)
 	v_PVOID_t pvosGCtx = vos_get_global_context(VOS_MODULE_ID_HDD, NULL);
 	hdd_context_t *hdd_ctx = vos_get_context(VOS_MODULE_ID_HDD, pvosGCtx);
 	tANI_U8 *param;
-	int j, tempInt, ret = 0, i, num_channels;
-	int parsed_channels[MAX_CHANNEL];
-	bool is_command_repeated = false;
+	int j, tempInt, index = 0, ret = 0;
 
 	if (NULL == pvosGCtx) {
 		hddLog(VOS_TRACE_LEVEL_FATAL,
@@ -3714,25 +3712,13 @@ int hdd_parse_disable_chan_cmd(hdd_adapter_t *adapter, tANI_U8 *ptr)
 	}
 
 	mutex_lock(&hdd_ctx->cache_channel_lock);
-	if (!hdd_ctx->original_channels) {
-		if (hdd_alloc_chan_cache(hdd_ctx, tempInt)) {
-			ret = -ENOMEM;
-			goto mem_alloc_failed;
-		}
-	} else if (hdd_ctx->original_channels->num_channels != tempInt) {
-		hddLog(VOS_TRACE_LEVEL_ERROR,
-		       "%s, Invalid No of channel provided in the list",
-		       __func__);
-			ret = -EINVAL;
-			is_command_repeated = true;
-			goto parse_failed;
-	} else {
-		is_command_repeated = true;
+	if (hdd_alloc_chan_cache(hdd_ctx, tempInt)) {
+		ret = -ENOMEM;
+		goto parse_done;
 	}
+	index = hdd_ctx->orginal_channels->num_channels - tempInt;
 
-	num_channels = tempInt;
-
-	for (j = 0; j < num_channels; j++) {
+	for (j = index; j < hdd_ctx->orginal_channels->num_channels; j++) {
 		/*
 		 * param pointing to the beginning of first space
 		 * after number of channels
@@ -3744,7 +3730,7 @@ int hdd_parse_disable_chan_cmd(hdd_adapter_t *adapter, tANI_U8 *ptr)
 			       "%s, Invalid No of channel provided in the list",
 			       __func__);
 			ret = -EINVAL;
-			goto parse_failed;
+			goto parse_done;
 		}
 
 		param++;
@@ -3758,7 +3744,7 @@ int hdd_parse_disable_chan_cmd(hdd_adapter_t *adapter, tANI_U8 *ptr)
 			       "%s, No channel is provided in the list",
 				__func__);
 			ret = -EINVAL;
-			goto parse_failed;
+			goto parse_done;
 
 		}
 
@@ -3767,7 +3753,7 @@ int hdd_parse_disable_chan_cmd(hdd_adapter_t *adapter, tANI_U8 *ptr)
 			       "%s: Cannot read channel number",
 			       __func__);
 			ret = -EINVAL;
-			goto parse_failed;
+			goto parse_done;
 
 		}
 
@@ -3776,14 +3762,14 @@ int hdd_parse_disable_chan_cmd(hdd_adapter_t *adapter, tANI_U8 *ptr)
 			       "%s: Invalid channel number received",
 			       __func__);
 			ret = -EINVAL;
-			goto parse_failed;
+			goto parse_done;
 
 		}
 
 		hddLog(VOS_TRACE_LEVEL_INFO, "%s: channel[%d] = %d", __func__,
 		       j, tempInt);
-
-		parsed_channels[j] = tempInt;
+		hdd_ctx->orginal_channels->channel_info[j].channel_num =
+								tempInt;
 	}
 
 	/*extra arguments check*/
@@ -3796,70 +3782,48 @@ int hdd_parse_disable_chan_cmd(hdd_adapter_t *adapter, tANI_U8 *ptr)
 			hddLog(VOS_TRACE_LEVEL_ERROR,
 			       "%s: Invalid argument received", __func__);
 			ret = -EINVAL;
-			goto parse_failed;
+			goto parse_done;
 		}
 	}
 
-	/*
-	 * If command is received first time, cache the channels to
-	 * be disabled else compare the channels received in the
-	 * command with the cached channels, if channel list matches
-	 * return success otherewise return failure.
-	 */
-	 if (!is_command_repeated)
-		for (j = 0; j < num_channels; j++)
-			hdd_ctx->original_channels->
-					channel_info[j].channel_num =
-							parsed_channels[j];
-	else {
-		for (i = 0; i < num_channels; i++) {
-			for (j = 0; j < num_channels; j++)
-				if (hdd_ctx->original_channels->
-						channel_info[i].channel_num ==
-							parsed_channels[j])
-					break;
-			if (j == num_channels) {
-				ret = -EINVAL;
-				goto parse_failed;
-			}
-		}
-		ret = 0;
-	}
-
-mem_alloc_failed:
+parse_done:
 	mutex_unlock(&hdd_ctx->cache_channel_lock);
 	EXIT();
 
 	return ret;
-
-parse_failed:
-	mutex_unlock(&hdd_ctx->cache_channel_lock);
-	if (!is_command_repeated)
-		wlan_hdd_free_cache_channels(hdd_ctx);
-	EXIT();
-	return ret;
-
 }
 
 int hdd_get_disable_ch_list(hdd_context_t *hdd_ctx, tANI_U8 *buf,
-			    uint32_t buf_len)
+			    tANI_U8 buf_len)
 {
 	struct hdd_cache_channel_info *ch_list;
 	unsigned char i, num_ch;
 	int len = 0;
 
 	mutex_lock(&hdd_ctx->cache_channel_lock);
-	if (hdd_ctx->original_channels &&
-	    hdd_ctx->original_channels->num_channels &&
-	    hdd_ctx->original_channels->channel_info) {
-		num_ch = hdd_ctx->original_channels->num_channels;
+	if (hdd_ctx->orginal_channels &&
+	    hdd_ctx->orginal_channels->num_channels) {
+		num_ch = hdd_ctx->orginal_channels->num_channels;
+
+		if (num_ch == 0) {
+			mutex_unlock(&hdd_ctx->cache_channel_lock);
+			VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO,
+				  FL("no disable channels programed"));
+			return 0;
+		}
 
 		len = scnprintf(buf, buf_len, "%s %hhu",
 				"GET_DISABLE_CHANNEL_LIST", num_ch);
 
-		ch_list = hdd_ctx->original_channels->channel_info;
+		ch_list = hdd_ctx->orginal_channels->channel_info;
+		if (!ch_list) {
+			mutex_unlock(&hdd_ctx->cache_channel_lock);
+			VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO,
+				  FL("disable channel list is NULL"));
+			return 0;
+		}
 
-		for (i = 0; (i < num_ch) && (len < buf_len-1); i++) {
+		for (i = 0; (i < num_ch) && len <= buf_len; i++) {
 			len += scnprintf(buf + len, buf_len - len,
 			" %d", ch_list[i].channel_num);
 		}
@@ -6736,9 +6700,8 @@ static int hdd_driver_command(hdd_adapter_t *pAdapter,
            char buf[32], len;
            void *cookie;
            struct hdd_request *request;
-           struct bcn_miss_rate_priv *priv;
            static const struct hdd_request_params params = {
-               .priv_size = sizeof(*priv),
+               .priv_size = 0,
                .timeout_ms = WLAN_WAIT_TIME_STATS,
            };
 
@@ -6758,8 +6721,6 @@ static int hdd_driver_command(hdd_adapter_t *pAdapter,
                goto exit;
            }
            cookie = hdd_request_cookie(request);
-           priv = hdd_request_priv(request);
-           priv->bcn_miss_rate = -1;
 
            status = sme_getBcnMissRate((tHalHandle)(pHddCtx->hHal),
                                        pAdapter->sessionId,
@@ -6784,15 +6745,9 @@ static int hdd_driver_command(hdd_adapter_t *pAdapter,
            }
 
            hddLog(VOS_TRACE_LEVEL_INFO,
-                  FL("GETBCNMISSRATE: bcnMissRate: %d"), priv->bcn_miss_rate);
+                  FL("GETBCNMISSRATE: bcnMissRate: %d"), gbcnMissRate);
 
-           if (priv->bcn_miss_rate == -1) {
-               ret = -EFAULT;
-               goto free_bcn_miss_rate_req;
-           }
-
-           len = snprintf(buf, sizeof(buf), "GETBCNMISSRATE %d",
-                          priv->bcn_miss_rate);
+           len = snprintf(buf, sizeof(buf), "GETBCNMISSRATE %d", gbcnMissRate);
            if (copy_to_user(priv_data.buf, &buf, len + 1))
            {
                hddLog(VOS_TRACE_LEVEL_ERROR,
@@ -6933,10 +6888,9 @@ free_bcn_miss_rate_req:
                ret = -ENOMEM;
                goto exit;
            }
-           cookie = hdd_request_cookie(request);
 
            status = sme_GetFwStats( (tHalHandle)pHddCtx->hHal, stats,
-                                   cookie, hdd_fw_stats_cb);
+                                   cookie, hdd_fw_statis_cb);
            if (eHAL_STATUS_SUCCESS != status)
            {
                hddLog(VOS_TRACE_LEVEL_ERROR,
@@ -7076,25 +7030,25 @@ free_bcn_miss_rate_req:
                 goto exit;
        }
        else if (strncmp(command, "GET_DISABLE_CHANNEL_LIST", 24) == 0) {
-            char extra[512] = {0};
-            int max_len, copied_length;
+            char extra[128] = {0};
+            int len;
 
-            VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+            VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO,
                 " Received Command to get disable Channels list %s",
                 __func__);
 
-            max_len = VOS_MIN(priv_data.total_len, sizeof(extra));
-            copied_length = hdd_get_disable_ch_list(pHddCtx, extra, max_len);
-            if (copied_length == 0) {
-                VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+            len = hdd_get_disable_ch_list(pHddCtx, extra, sizeof(extra));
+            if (len == 0) {
+                VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO,
                           FL("disable channel list are not yet programed"));
                 ret = -EINVAL;
                 goto exit;
             }
 
-            if (copy_to_user(priv_data.buf, &extra, copied_length + 1)) {
-                VOS_TRACE( VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
-                          "%s: failed to copy data to user buffer", __func__);
+            len = VOS_MIN(priv_data.total_len, len + 1);
+            if (copy_to_user(priv_data.buf, &extra, len)) {
+               VOS_TRACE( VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+                  "%s: failed to copy data to user buffer", __func__);
                ret = -EFAULT;
                goto exit;
             }
@@ -10006,9 +9960,9 @@ hdd_adapter_t* hdd_open_adapter( hdd_context_t *pHddCtx, tANI_U8 session_type,
    return pAdapter;
 
 err_free_netdev:
+   free_netdev(pAdapter->dev);
    wlan_hdd_release_intf_addr( pHddCtx,
                                pAdapter->macAddressCurrent.bytes );
-   free_netdev(pAdapter->dev);
 
 resume_bmps:
    //If bmps disabled enable it
@@ -12470,9 +12424,6 @@ free_hdd_ctx:
       hddLog(VOS_TRACE_LEVEL_ERROR, "%s: failed to free power on lock",
                                            __func__);
    }
-
-    /* Free the cache channels of the command SET_DISABLE_CHANNEL_LIST */
-    wlan_hdd_free_cache_channels(pHddCtx);
 
    //Free up dynamically allocated members inside HDD Adapter
    if (pHddCtx->cfg_ini)
